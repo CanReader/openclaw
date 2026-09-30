@@ -202,6 +202,76 @@ describe("googlechat monitor typing placeholder custody", () => {
     );
   });
 
+  it("ends placeholder custody with a deferred turn and sends a late retained delivery as a new message", async () => {
+    // Core returns from a queued follow-up after onDeferred without delivering. The
+    // follow-up later sends through the origin route; only a failed origin send
+    // reaches this retained source delivery, which must not edit the deleted placeholder.
+    let retainedDeliver: ((payload: { text: string }) => Promise<void>) | undefined;
+    const lifecycle = {
+      admission: "exclusive",
+      abortSignal: new AbortController().signal,
+      onAdopted: vi.fn(),
+      onDeferred: vi.fn(),
+      onAbandoned: vi.fn(),
+    } satisfies GoogleChatIngressLifecycle;
+    const core = {
+      logging: { shouldLogVerbose: () => false },
+      channel: {
+        inbound: {
+          buildContext: vi.fn((payload: unknown) => payload),
+          run: vi.fn(
+            async (params: {
+              turnAdoptionLifecycle?: GoogleChatIngressLifecycle;
+              adapter: {
+                resolveTurn: () => {
+                  delivery: { deliver: (payload: { text: string }) => Promise<void> };
+                };
+              };
+            }) => {
+              params.turnAdoptionLifecycle?.onDeferred();
+              retainedDeliver = params.adapter.resolveTurn().delivery.deliver;
+            },
+          ),
+        },
+        media: { saveMediaBuffer: vi.fn() },
+        text: {
+          resolveChunkMode: vi.fn(() => "markdown"),
+          chunkMarkdownTextWithMode: vi.fn(() => ["late answer"]),
+        },
+      },
+    } as unknown as GoogleChatCoreRuntime;
+    apiMocks.sendGoogleChatMessage.mockResolvedValueOnce({
+      messageName: "spaces/DEFERRED/messages/typing",
+      threadName: undefined,
+    });
+    if (!routingMocks.processEvent) {
+      throw new Error("Expected Google Chat webhook event processor registration");
+    }
+
+    await routingMocks.processEvent(
+      typingCleanupEvent("spaces/DEFERRED"),
+      { account, config: {}, runtime: { error: vi.fn(), log: vi.fn() }, core, mediaMaxMb: 10 },
+      lifecycle,
+    );
+
+    expect(lifecycle.onDeferred).toHaveBeenCalledOnce();
+    expect(apiMocks.deleteGoogleChatMessage).toHaveBeenCalledExactlyOnceWith({
+      account,
+      messageName: "spaces/DEFERRED/messages/typing",
+    });
+
+    await retainedDeliver?.({ text: "late answer" });
+
+    expect(apiMocks.updateGoogleChatMessage).not.toHaveBeenCalled();
+    expect(apiMocks.sendGoogleChatMessage).toHaveBeenLastCalledWith({
+      account,
+      space: "spaces/DEFERRED",
+      text: "late answer",
+      thread: undefined,
+    });
+    expect(apiMocks.deleteGoogleChatMessage).toHaveBeenCalledOnce();
+  });
+
   it("leaves placeholder deletion to delivery once a reply claims it", async () => {
     const core = {
       logging: { shouldLogVerbose: () => false },
