@@ -11,7 +11,7 @@ import {
   setReplyPayloadMetadata,
   type ReplyPayload,
 } from "../../auto-reply/reply-payload.js";
-import { AUTOMATION_FAILED_TOKEN, isSilentReplyPayloadText } from "../../auto-reply/tokens.js";
+import { isSilentReplyPayloadText } from "../../auto-reply/tokens.js";
 import { truncateUtf16Safe } from "../../utils.js";
 
 type DeliveryPayload = Pick<
@@ -34,8 +34,6 @@ type CronPayloadOutcome = {
   hasFatalErrorPayload: boolean;
   hasFatalStructuredErrorPayload: boolean;
   embeddedRunError?: string;
-  /** The run error is the agent's own AUTOMATION_FAILED report, not a runtime failure. */
-  agentReportedFailure?: true;
   pendingPresentationWarningError?: string;
 };
 
@@ -81,7 +79,7 @@ export function pickSummaryFromOutput(text: string | undefined) {
 }
 
 /** Picks the last non-empty payload text while ignoring terminal error payloads first. */
-export function pickLastNonEmptyTextFromPayloads(
+function pickLastNonEmptyTextFromPayloads(
   payloads: Array<{ text?: string | undefined; isError?: boolean }>,
 ) {
   const successful = payloads
@@ -293,27 +291,12 @@ export function resolveCronPayloadOutcome(params: {
       ? { ...params.failureSignal, message: failureMessage }
       : undefined;
   const runLevelError = formatCronRunLevelError(params.runLevelError);
-  // Only an exact first line counts; a reply that quotes the token stays ordinary output.
-  const [reportedFirstLine, ...reportedDetail] = (
-    normalizedFinalAssistantVisibleText ??
-    fallbackOutputText ??
-    ""
-  ).split("\n");
-  const reportedFailure =
-    reportedFirstLine?.trim() === AUTOMATION_FAILED_TOKEN
-      ? (normalizeOptionalString(reportedDetail.join("\n")) ??
-        "The automation run reported that it failed.")
-      : undefined;
   const hasFatalErrorPayload =
-    hasFatalStructuredErrorPayload ||
-    failureSignal !== undefined ||
-    runLevelError !== undefined ||
-    reportedFailure !== undefined;
+    hasFatalStructuredErrorPayload || failureSignal !== undefined || runLevelError !== undefined;
   const structuredErrorText = hasFatalStructuredErrorPayload
     ? (lastErrorPayloadText ?? "cron isolated run returned an error payload")
     : undefined;
-  const fatalDeliveryText =
-    structuredErrorText ?? failureSignal?.message ?? runLevelError ?? reportedFailure;
+  const fatalDeliveryText = structuredErrorText ?? failureSignal?.message ?? runLevelError;
   const fatalDeliveryPayload = fatalDeliveryText
     ? ({ text: fatalDeliveryText, isError: true } satisfies DeliveryPayload)
     : undefined;
@@ -342,10 +325,7 @@ export function resolveCronPayloadOutcome(params: {
       ? structuredErrorText
       : failureSignal
         ? formatCronFailureSignal(failureSignal)
-        : (runLevelError ?? reportedFailure),
-    ...(fatalDeliveryText === reportedFailure && reportedFailure !== undefined
-      ? { agentReportedFailure: true as const }
-      : {}),
+        : runLevelError,
     pendingPresentationWarningError: hasPendingPresentationWarning
       ? lastErrorPayloadText
       : undefined,

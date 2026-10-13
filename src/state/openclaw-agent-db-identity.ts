@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
+import { getSqliteDatabaseAdmissionIdentityForPath } from "../infra/sqlite-database-admission.js";
 import {
   normalizeDatabasePath,
   readDatabasePathIdentitySync,
+  resolveDatabasePathKey,
+  type DatabaseFileIdentity,
 } from "../infra/sqlite-worker-identity.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 
@@ -21,14 +24,23 @@ const identities = resolveGlobalSingleton(
         incarnation: string;
         filename: string;
         canonicalPath: string;
+        ownerDatabasePath?: string;
       }
     >(),
 );
 
 /** Prepare physical and connection identity once at open; cached aliases are not resolved again. */
-export function registerOpenClawAgentDatabaseIdentity(db: DatabaseSync): void {
+export function registerOpenClawAgentDatabaseIdentity(
+  db: DatabaseSync,
+  ownerDatabasePath?: string,
+): void {
   const filename = normalizeDatabasePath(db.location() ?? "");
-  const file = filename ? readDatabasePathIdentitySync(filename) : undefined;
+  const admitted = filename ? getSqliteDatabaseAdmissionIdentityForPath(filename) : undefined;
+  const file = admitted
+    ? { ...admitted, canonicalPath: resolveDatabasePathKey(filename) }
+    : filename
+      ? readDatabasePathIdentitySync(filename)
+      : undefined;
   if (file && !file.key.startsWith("file:")) {
     throw new Error("OpenClaw agent database disappeared before identity registration");
   }
@@ -39,6 +51,7 @@ export function registerOpenClawAgentDatabaseIdentity(db: DatabaseSync): void {
     incarnation: randomUUID(),
     filename,
     canonicalPath: file?.canonicalPath ?? filename,
+    ownerDatabasePath: ownerDatabasePath ? resolveDatabasePathKey(ownerDatabasePath) : undefined,
   });
 }
 
@@ -74,24 +87,32 @@ export function isOpenClawAgentDatabasePathCurrent(
   return current !== undefined && identity === `${current.dev}:${current.ino}`;
 }
 
-export type OpenClawAgentDatabaseClaim = {
-  identity: OpenClawAgentDatabaseIdentity;
-  /** Changes on reopen even when the underlying file is unchanged. */
-  incarnation: string;
-  isCurrent: () => boolean;
-  assertCurrent: () => void;
-  release: () => void;
-};
+export function assertOpenClawAgentDatabaseIdentity(
+  database: AgentDatabaseOwner & { path: string },
+  expected: DatabaseFileIdentity,
+): void {
+  const identity = readOpenClawAgentDatabaseIdentity(database);
+  if (
+    `file:${String(identity.identity)}` !== expected.key ||
+    (expected.birthtime !== undefined && identity.birthtime !== expected.birthtime) ||
+    !isOpenClawAgentDatabasePathCurrent(database)
+  ) {
+    throw new Error("Agent database changed during repair admission");
+  }
+}
+
+export type OpenClawAgentDatabaseClaim = ReturnType<typeof createOpenClawAgentDatabaseClaim>;
 
 export function createOpenClawAgentDatabaseClaim(
   database: AgentDatabaseOwner,
   release: () => void,
-): OpenClawAgentDatabaseClaim {
+) {
   let released = false;
   const isCurrent = () => !released && database.db.isOpen;
   const { identity, incarnation } = readOpenClawAgentDatabaseIdentity(database);
   return {
     identity,
+    // Changes on reopen even when the underlying file is unchanged.
     incarnation,
     isCurrent,
     assertCurrent: () => {

@@ -38,12 +38,6 @@ const GOOGLE_VIDEO_OPERATION_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
 const GOOGLE_VIDEO_EMPTY_RESULT_MESSAGE =
   "Google video generation response missing generated videos";
 
-function assertGeneratedVideoBufferWithinLimit(buffer: Buffer, maxBytes: number): void {
-  if (buffer.length > maxBytes) {
-    throw new Error(`Google generated video download exceeds ${maxBytes} bytes`);
-  }
-}
-
 function resolveGoogleVideoRestBaseUrl(configuredBaseUrl?: string): string {
   return `${configuredBaseUrl ?? "https://generativelanguage.googleapis.com"}/v1beta`;
 }
@@ -147,25 +141,14 @@ function resolveGoogleGeneratedVideoDownloadUrl(params: {
   if (!trimmed) {
     return undefined;
   }
-  let url: URL;
-  try {
-    url = new URL(trimmed);
-  } catch {
-    return undefined;
-  }
-  if (url.protocol !== "https:") {
+  const url = URL.parse(trimmed);
+  if (url?.protocol !== "https:") {
     return undefined;
   }
   const allowedOrigins = new Set(["https://generativelanguage.googleapis.com"]);
-  if (params.configuredBaseUrl) {
-    try {
-      const configuredOrigin = new URL(params.configuredBaseUrl).origin;
-      if (configuredOrigin.startsWith("https://")) {
-        allowedOrigins.add(configuredOrigin);
-      }
-    } catch {
-      // Ignore invalid configured origins; the request base URL is already normalized.
-    }
+  const configuredOrigin = URL.parse(params.configuredBaseUrl ?? "")?.origin;
+  if (configuredOrigin?.startsWith("https://")) {
+    allowedOrigins.add(configuredOrigin);
   }
   if (!allowedOrigins.has(url.origin)) {
     return undefined;
@@ -550,7 +533,9 @@ export function buildGoogleVideoGenerationProvider(): VideoGenerationProvider {
               throw new Error("Google video generation returned malformed base64 video data");
             }
             const buffer = Buffer.from(canonicalVideo, "base64");
-            assertGeneratedVideoBufferWithinLimit(buffer, maxVideoBytes);
+            if (buffer.length > maxVideoBytes) {
+              throw new Error(`Google generated video download exceeds ${maxVideoBytes} bytes`);
+            }
             return {
               buffer,
               mimeType: normalizeOptionalString(inline.mimeType) || "video/mp4",
